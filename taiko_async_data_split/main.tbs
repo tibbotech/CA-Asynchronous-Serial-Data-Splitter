@@ -1,0 +1,291 @@
+'----------------------------------------------------------------------------------------------
+''''''''''''''''''''''''''''''  Keytroller Data Split Project '''''''''''''''''''''''''''''''''
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+'
+'This program was created to be used to facilitate the data transfer between the master serial 
+'port (COM 0), which connects to the PC, and three slave serial ports (COM 1 ~ 3), which 
+'connects to three keytrollers.
+'
+'The data received from the four serial ports are extracted and checked to make sure it conforms 
+'to the packet structure of the keytroller protocol (STX+Data+CR/ETX).  Data from the master
+'serial port will be passed to all the slave ports while the data from the slave ports will be 
+'passed to the master port only.
+'
+'The receiving of data and the sending of the data are asyncronus. The basic structure are as
+'follows:
+'
+'  [Source] > RX Buffer > Global RX Variable > Packet Checker > Global TX Variable > 
+'  TX Buffer > [Destination]
+'
+'
+'A Telnet data dump is also included for monitoring the data transfer.  There are xxxx modes:
+'
+'  a or A : See all communications (Default Mode)
+'       2 : See communication between Master and COM 1
+'       3 : See communication between Master and COM 2
+'       4 : See communication between Master and COM 3
+'  u or U : Switch into Firmware upload mode (All data are routed without checking, please 
+'             connect only one keytroller to the slave ports for the firmware upgrade)
+'  p or P : Pause the data dump output (will resume when a proper mode is selected)
+'
+'
+'Notes:
+'  - The design of the program was to have all three slave ports occupide by keytrollers.  This 
+'      creates a problem when using flow control when not all slave ports are connected.  Since
+'      the TX global variable and TX buffer of the unconnected will accumulate and prevent any
+'      further data to be transfered to any of the slave ports.  This problem does not exist
+'      when flow control is disabled.
+'
+'  - The current state of the program has the flow control enabled, to disable it, you will need
+'      to adjust the ser.flowcontrol under on_sys_init and on_sock_data_arrival
+'
+'
+'REV. 08292007
+'----------------------------------------------------------------------------------------------
+
+include "global.tbh"
+
+public dim cmd as string
+
+public dim s1,d1,d2,d3,sb1,db1,db2,db3 as string
+public dim f as byte
+
+const stx_hex=chr(val("&h02"))
+const cr_hex=chr(val("&h0d"))
+const etx_hex=chr(val("&h03"))
+
+'------------------------------------------------------------
+sub on_sys_init
+	
+	'The following lines of code are required to enable flow control for all 4 serial ports
+	io.num=PL_IO_NUM_0	'RTS line of serial port 0
+	io.enabled=YES		'we configure this line as output
+	io.num=PL_IO_NUM_1	'RTS line of serial port 1
+	io.enabled=YES		'we configure this line as output
+	io.num=PL_IO_NUM_2	'RTS line of serial port 2
+	io.enabled=YES		'we configure this line as output
+	io.num=PL_IO_NUM_3	'RTS line of serial port 3
+	io.enabled=YES		'we configure this line as output
+
+	cmd = "A"
+	net.ip="192.168.1.96"
+		
+	ser.num=0		'master
+	ser.rxbuffrq(2)
+	ser.txbuffrq(13)
+	ser.num=1		'slave 1
+	ser.rxbuffrq(8)
+	ser.txbuffrq(5)
+	ser.num=2		'slave 2
+	ser.rxbuffrq(8)
+	ser.txbuffrq(5)
+	ser.num=3		'slave 3
+	ser.rxbuffrq(8)
+	ser.txbuffrq(5)
+	sock.num=0		
+	sock.rxbuffrq(1)
+	sock.txbuffrq(10)
+	sys.buffalloc
+	
+	for f=0 to 3
+		ser.num=f
+		ser.baudrate=ser.div9600/4	'38400
+		ser.flowcontrol=enabled
+		ser.enabled=YES
+	next f
+
+	sock.protocol=PL_SOCK_PROTOCOL_TCP
+	sock.localportlist="65535"			
+	sock.inconmode=PL_SOCK_INCONMODE_ANY_IP_ANY_PORT
+	sock.reconmode=PL_SOCK_RECONMODE_3
+
+	rtc.setdata(0,0,0)	'Reset Real Time Clock 
+end sub
+
+'------------------------------------------------------------
+sub on_ser_data_arrival	
+
+if cmd = "U" or cmd = "u" then		'If under firmware upload mode, data are just redirected to the appropriate port
+	dim rxData, txData as string
+	
+	select case ser.num	
+	case 0 
+		rxData = ser.getdata(255)
+		
+		for f=1 to 3
+			ser.num=f
+			ser.setdata(rxData)
+			ser.send
+		next f
+	case 1,2,3
+		
+		rxData = ser.getdata(255)
+		
+		ser.num = 0
+		ser.setdata(rxData)
+		ser.send
+	end select
+else
+	select case ser.num
+		case 0
+			dim d1free,d2free,d3free,sbfree,temp1,temp2,bufflen as integer
+			
+			d1free = 255-len(d1)
+			d2free = 255-len(d2)
+			d3free = 255-len(d3)
+			sbfree = 255-len(sb1)
+			
+			if d1free < d2free then		'check for the shortest available TX variable for COM1 ~ COM3
+				temp1 = d1free
+			else
+				temp1 = d2free
+			end if
+			
+			if d3free < sbfree then
+				temp2 = d3free
+			else
+				temp2 = sbfree
+			end if
+			
+			if temp1 < temp2 then
+				bufflen = temp1
+			else
+				bufflen = temp2
+			end if
+	
+			sb1=sb1+ser.getdata(bufflen)
+			if len(sb1) >= 2 then					'shortest meaningful packet consists of at least 2 bytes
+				ExtractPacket(ser.num,sb1)
+			end if
+		case 1
+			db1=db1+ser.getdata(255-len(db1))
+			if len(db1) >= 2 then
+				ExtractPacket(ser.num,db1)
+			end if
+		case 2
+			db2=db2+ser.getdata(255-len(db2))
+			if len(db2) >= 2 then
+				ExtractPacket(ser.num,db2)
+			end if
+		case 3
+			db3=db3+ser.getdata(255-len(db3))
+			if len(db3) >= 2 then
+				ExtractPacket(ser.num,db3)
+			end if
+		end select
+	end if
+end sub
+
+
+'------------------------------------------------------------
+sub on_ser_data_sent	'event fired when condition preset by ser.notifysent is met 
+	dim sData as string
+	dim datalen as byte
+	
+	datalen = ser.txfree
+	
+	select case ser.num
+	case 0 
+		if len(s1) > datalen then	'since the TX variable could have grown in length, we check again to see if the TX buffer have enough free space
+			sData = left(s1,datalen)
+			s1 = right(s1,len(s1)-datalen)
+			ser.notifysent(ser.txbuffsize-len(s1))	'if TX buffer does not have enough space, place data transfer on queue
+		else
+			sData = s1
+			s1 = ""		'flush the TX variable
+		end if	
+		ser.setdata(sData)	'set the data  
+		ser.send			'send the data
+	case 1
+		if len(d1) > datalen then
+			sData = left(d1,datalen)
+			d1 = right(d1,len(d1)-datalen)
+			ser.notifysent(ser.txbuffsize-len(d1))
+		else
+			sData = d1
+			d1 = ""
+		end if
+		ser.setdata(sData)
+		ser.send
+	case 2
+		if len(d2) > datalen then
+			sData = left(d2,datalen)
+			d2 = right(d2,len(d2)-datalen)
+			ser.notifysent(ser.txbuffsize-len(d2))
+		else
+			sData = d2
+			d2 = ""
+		end if
+		ser.setdata(sData)
+		ser.send
+	case 3
+		if len(d3) > datalen then
+			sData = left(d3,datalen)
+			d3 = right(d3,len(d3)-datalen)
+			ser.notifysent(ser.txbuffsize-len(d3))
+		else
+			sData = d3
+			d3 = ""
+		end if
+		ser.setdata(sData)
+		ser.send
+	end select
+	
+end sub
+
+'------------------------------------------------------------
+sub on_sock_data_arrival
+	dim sCheck as string(1)
+	
+	sCheck=sock.getdata(1)
+	if sCheck = "a" or sCheck = "A" or sCheck = "2" or sCheck = "3" or sCheck = "4" or sCheck = "U" or sCheck = "u" or sCheck = "p" or sCheck = "P" then
+		
+		if cmd = "U" or cmd = "u" then	'if already in firmware upload mode, reset the serial port to the proper state.
+		
+			for f=0 to 3
+			ser.num=f
+			ser.enabled = NO
+			ser.flowcontrol=ENABLED
+			ser.enabled=YES
+			next f
+		
+		end if
+			
+		cmd = sCheck
+		
+		select case sCheck
+		
+		case "A","a"
+			sock.setdata(chr(10)+chr(13)+"Switching into full view mode"+chr(10)+chr(13))
+		case "2"
+			sock.setdata(chr(10)+chr(13)+"Switching into Master + Com 1 monitor mode"+chr(10)+chr(13))
+		case "3"
+			sock.setdata(chr(10)+chr(13)+"Switching into Master + Com 2 monitor mode"+chr(10)+chr(13))
+		case "4"
+			sock.setdata(chr(10)+chr(13)+"Switching into Master + Com 3 monitor mode"+chr(10)+chr(13))
+		case "p","P"
+			sock.setdata(chr(10)+chr(13)+"PAUSED... Please issue proper command (A,2,3,4,U) to continue..."+chr(10)+chr(13))
+		case "U","u"
+			sock.setdata(chr(10)+chr(13)+"Switching into Firmware upload mode"+chr(10)+chr(13))
+			
+			for f=0 to 3	'Change the serial setting to suit the firmware upload
+			ser.num=f
+			ser.enabled = NO
+			ser.flowcontrol=disabled
+			ser.enabled=YES
+			next f
+			
+		end select
+	else
+		sock.setdata(chr(10)+chr(13)+"Incorrect Command"+chr(10)+chr(13))		
+	end if
+	
+	sock.send
+end sub
+
+
+'------------------------------------------------------------
+sub on_sock_data_sent		'event fired when condition preset by sock.notifysent is met
+	sock.setdata(chr(10)+chr(13)+"***"+chr(10)+chr(13))	'Indicates that there were data lost due to sock's TX buffer being full.
+	sock.send
+end sub

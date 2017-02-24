@@ -1,0 +1,21 @@
+'*********************************************************************************
+'   LIBRARY FOR KEYTROLLER
+'*********************************************************************************
+
+include "global.tbh"
+
+'=================================================================================
+
+public function GetCurrentTimestamp() as string
+dim x,y as byte
+dim d,h as word
+dim curr_h,curr_m,curr_s as byte
+	rtc.getdata(d,h,curr_s)
+	curr_h=hours(h)
+	curr_m=minutes(h)
+	GetCurrentTimestamp=str(curr_h)+":"+str(curr_m)+":"+str(curr_s)
+end function
+
+
+
+

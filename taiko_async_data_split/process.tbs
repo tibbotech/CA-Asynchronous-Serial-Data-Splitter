@@ -1,0 +1,161 @@
+'*************************************************************************************************************************
+'   PROCESS FOR KEYTROLLER
+'*************************************************************************************************************************
+
+include "global.tbh"
+
+const stx_hex=chr(val("&h02"))
+const cr_hex=chr(val("&h0d"))
+const etx_hex=chr(val("&h03"))
+
+declare cmd,s1,d1,d2,d3,sb1,db1,db2,db3 as string
+
+'========================================================================================================================
+
+public sub ExtractPacket(ser_orig as byte,byref s as string)	'Extract data in RX variable and check for validity
+	dim i,stx,etx as short
+	dim pkt,sChar as string
+	dim wexit as boolean
+	
+	stx=0
+	etx=0
+	wexit = false
+	
+	while wexit = false
+	
+		for i=1 to len(s)		'Loop to search for the STX,ETX/CR position
+		
+			sChar =  mid(s,i,1)
+			if sChar = stx_hex and etx = 0 then
+				stx=i
+			end if
+			
+			if (sChar = etx_hex or sChar = cr_hex) and etx = 0 then
+				etx=i	
+			end if
+			
+			if stx <> 0 and etx <> 0 then	
+				exit for
+			end if
+			
+		next i
+		
+		if stx = 0 and etx = 0 then 
+			exit while 
+		end if
+		
+		if stx>etx then    							'ETX is ahead of STX or STX is found, but ETX not found
+			if stx=1 and len(s)>=255 then			' If STX is at position 1 and the string is already >=255 in length, discard string
+				sendToSocket(s,ser_orig)	'ok
+				s=""
+				exit while
+			end if
+			
+			if etx = 0 then
+				dim sPos as byte
+				sPos = len(left(s,len(s)-stx))
+				if  stx <> 1 then
+					sendToSocket(left(s,stx-1),ser_orig)
+				end if
+				s=right(s,len(s)-stx+1)				'truncate string to where the STX starts
+				exit while
+			else
+				sendToSocket(left(s,len(s)-stx),ser_orig)
+				s=right(s,len(s)-stx+1)	
+				stx=0
+				etx=0
+			end if	
+				
+		else
+			if stx=0 then    						'STX not found, ETX is either found or not found.
+				sendToSocket(s,ser_orig)
+				s=""
+				exit while
+			end if 
+			
+			if stx <> 1 then
+				sendToSocket(left(s,stx-1),ser_orig)
+			end if
+			
+			pkt=mid(s,stx,(etx-stx)+1)
+			s=right(s,len(s)-etx)						        'STX and ETX are both found in order
+			
+			select case ser_orig 		'Place the checked packet into the the TX variable(s)
+			case 0	
+				d1 = d1+pkt
+				d2 = d2+pkt
+				d3 = d3+pkt	
+			case 1,2,3
+				s1 = s1+pkt					
+			end select
+			
+			sendToSocket(pkt,ser_orig)
+			stx=0
+			etx=0
+		end if
+	wend
+	
+	if ser_orig <> 0 then		'Data from slave ports are sent to the master port
+		if len(s1) > 0 then
+			ser.num=0
+			ser.notifysent(ser.txbuffsize-len(s1))
+		end if
+	else						'Data from the master port are sent to all slave ports
+		if len(d1) <> 0 then
+			ser.num=1
+			ser.notifysent(ser.txbuffsize-len(d1))	
+		end if
+		if len(d2) <> 0 then
+			ser.num=2
+			ser.notifysent(ser.txbuffsize-len(d2))
+		end if
+		if len(d3) <> 0 then
+			ser.num=3
+			ser.notifysent(ser.txbuffsize-len(d3))
+		end if
+	end if		
+end sub
+
+
+'------------------------------------------------------------
+
+public sub SendToSocket(s as string,ser_orig as byte)
+
+	if cmd <> "p" and cmd <> "P" then
+	
+		dim sSock,t_stamp as string
+		dim iSock as byte
+		t_stamp=GetCurrentTimestamp()		
+		iSock = ser_orig+1
+		sSock = str(iSock)+" ["+t_stamp+"]> "+s+chr(10)+chr(13)
+		
+		if sock.txfree < len(sSock) then		'If socket's TX buffer cannot hold the data completely
+			sock.notifysent(sock.txbuffsize-7)	'Sent notification message when the buffer has 7 bytes available.
+		else
+		
+			if ser_orig=0 then
+				sock.setdata("M ["+t_stamp+"]> "+s+chr(10)+chr(13))
+			else
+				
+				select case cmd
+				case "A","a"          'Show all
+					sock.setdata(sSock)
+				case "2"               'Show com 1 and com 2
+					if ser_orig=1 then
+						sock.setdata(sSock)
+					end if
+				case "3"               'Show com 1 and com 3
+					if ser_orig=2 then
+						sock.setdata(sSock)
+					end if
+				case "4"               'Show com 1 and com 4
+					if ser_orig=3 then
+						sock.setdata(sSock)
+					end if
+				end select
+			end if	
+			sock.send
+		end if
+	end if
+
+end sub
